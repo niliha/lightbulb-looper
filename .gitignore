@@ -1,0 +1,20 @@
+# platformIO
+.pio
+.clang_complete
+.gcc-flags.json
+.ccls
+.ccls-cache/
+
+# vs code
+.vscode/*
+# !.vscode/settings.json
+# !.vscode/tasks.json
+# !.vscode/launch.json
+# !.vscode/extensions.json
+# *.code-workspace
+
+# Local History for Visual Studio Code
+.history/
+
+# esp-idf
+sdkconfig.esp32dev.old
