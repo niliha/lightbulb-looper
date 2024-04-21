@@ -28,11 +28,14 @@ struct Pixel {
         uint8_t raw[3];
     };
 
-    uint8_t& operator[] (uint8_t x) 
-    {
+    Pixel() = default;
+
+    Pixel(uint8_t red, uint8_t green, uint8_t blue) : r(red), g(green), b(blue) {
+    }
+
+    uint8_t &operator[](uint8_t x) {
         return raw[x];
     }
 };
-
 
 using PixelFrame = std::vector<Pixel>;
