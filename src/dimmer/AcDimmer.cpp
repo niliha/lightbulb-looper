@@ -131,12 +131,12 @@ void init(const int channelCount, const int zeroCrossingPin, const int triacTask
                             /* core */ triacTaskCore);
 }
 
-void write(const PixelFrame &frame) {
-    assert(frame.size() == channelCount_);
+void write(const std::vector<uint8_t> &channels) {
+    assert(channels.size() == channelCount_);
 
     std::map<uint32_t, std::vector<std::pair<int, bool>>> channelsByDelay;
-    for (int channel = 0; channel < frame.size(); channel++) {
-        uint8_t brightness = std::max({frame[channel].r, frame[channel].g, frame[channel].b});
+    for (int channelIndex = 0; channelIndex < channels.size(); channelIndex++) {
+        uint8_t brightness = channels[channelIndex];
 
         // Make sure TRIAC is not activated if brightness is zero
         if (brightness == 0) {
@@ -144,11 +144,11 @@ void write(const PixelFrame &frame) {
         }
 
         auto triacOnDelay = map(brightness, 0, 255, MAX_TRIAC_EVENT_DELAY_MICROS_, MIN_TRIAC_EVENT_DELAY_MICROS_);
-        channelsByDelay[triacOnDelay].emplace_back(channel, true);
+        channelsByDelay[triacOnDelay].emplace_back(channelIndex, true);
 
         // Schedule the corresponding off event in the time slot following the on event
         auto triacOffDelay = map(brightness - 1, 0, 255, MAX_TRIAC_EVENT_DELAY_MICROS_, MIN_TRIAC_EVENT_DELAY_MICROS_);
-        channelsByDelay[triacOffDelay].emplace_back(channel, false);
+        channelsByDelay[triacOffDelay].emplace_back(channelIndex, false);
     }
 
     // Make sure the the back buffer is not accessed by the zero crossing ISR while it is being updated here
