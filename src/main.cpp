@@ -3,14 +3,17 @@
 #include "dimmer/AcDimmer.hpp"
 #include <FastLED.h>
 #include <dimmer/PixelFrame.hpp>
+#include <esp_log.h>
 #include <state_machine.hpp>
+
+static const char *TAG = "main";
 
 // Configuration
 const int CHANNEL_COUNT = 6;
 const std::array<int, CHANNEL_COUNT> FADE_TRIGGER_PINS = {5, 18, 19, 21, 22, 23};
 const std::array<int, CHANNEL_COUNT> FADE_SPEED_PINS = {34, 35, 14, 2, 4, 32};
-const int RECORDING_SWITCH_PIN = 33;  // TODO: Adapt pin
-const int BUTTON_DEBOUNCE_MS = 50;
+const int RECORDING_SWITCH_PIN = 27;
+const int BUTTON_DEBOUNCE_MS = 100;
 const int UPDATE_INTERVAL_MS = 33;
 const int MIN_BRIGHTNESS = 0;
 const int MAX_BRIGHTNESS = 255;
@@ -77,9 +80,9 @@ void writeChannels() {
     // AcDimmer::write(channels);
 }
 
-class InitialState : public State {
+class LiveState : public State {
  public:
-    std::unique_ptr<State> execute() override {
+    State *execute() override {
         bool isWriteRequired = prepareChannels();
         if (isWriteRequired) {
             writeChannels();
@@ -87,6 +90,10 @@ class InitialState : public State {
 
         delay(UPDATE_INTERVAL_MS);
         return nullptr;
+    }
+
+    std::string getName() override {
+        return "LiveState";
     }
 };
 
@@ -94,18 +101,26 @@ class RecordingState : public State {
  public:
     void enter() override {
         playbackEvents.clear();
+        lastFadeTriggerTimes.fill(0);
+        channels.fill(0);
         recordingStartMillis = millis();
     }
 
-    std::unique_ptr<State> execute() override {
+    State *execute() override {
         bool isWriteRequired = prepareChannels();
         if (isWriteRequired) {
-            playbackEvents.emplace_back(millis() - recordingStartMillis, channels);
+            auto eventMillis = millis() - recordingStartMillis;
+            playbackEvents.emplace_back(eventMillis, channels);
             writeChannels();
+            ESP_LOGI("RecordingState", "Recorded %dth event at %lu ms", playbackEvents.size(), eventMillis);
         }
 
         delay(UPDATE_INTERVAL_MS);
         return nullptr;
+    }
+
+    std::string getName() override {
+        return "RecordingState";
     }
 
  private:
@@ -118,19 +133,34 @@ class PlaybackState : public State {
         playbackStartMillis = millis();
     }
 
-    std::unique_ptr<State> execute() override {
+    State *execute() override {
+        if (playbackEvents.empty()) {
+            ESP_LOGW("PlaybackState", "No playback events available. Transitioning to LiveState...");
+            return new LiveState();
+        }
+
         auto &event = playbackEvents[currentPlaybackEventIndex];
-        delay(event.millis - (millis() - playbackStartMillis));
+        ESP_LOGI("PlaybackState", "Executing playback event %d of %d...", currentPlaybackEventIndex + 1,
+                 playbackEvents.size());
+
+        auto millisSincePlaybackStart = millis() - playbackStartMillis;
+        if (event.millis > millisSincePlaybackStart) {
+            delay(event.millis - millisSincePlaybackStart);
+        }
 
         channels = event.channels;
         writeChannels();
 
         currentPlaybackEventIndex++;
         if (currentPlaybackEventIndex >= playbackEvents.size()) {
-            return std::make_unique<PlaybackState>();
+            return new PlaybackState();
         } else {
             return nullptr;
         }
+    }
+
+    std::string getName() override {
+        return "PlaybackState";
     }
 
  private:
@@ -154,10 +184,10 @@ void IRAM_ATTR onRecordSwitchChange() {
         lastRecordButtonEventTimeMs = currentMillis;
     }
 
-    if (digitalRead(RECORDING_SWITCH_PIN) == LOW) {
-        stateMachine.setCurrentState(std::make_unique<RecordingState>());
+    if (stateMachine.getCurrentStateName() == "RecordingState") {
+        stateMachine.setNextState(new PlaybackState());
     } else {
-        stateMachine.setCurrentState(std::make_unique<PlaybackState>());
+        stateMachine.setNextState(new RecordingState());
     }
 }
 
@@ -165,6 +195,7 @@ extern "C" void app_main() {
     initArduino();
     Serial.begin(115200);
 
+    esp_log_level_set("gpio", ESP_LOG_WARN);
     // AcDimmer::init(CHANNEL_COUNT, 5, 0);
     // AcDimmer::testLights();
 
@@ -174,13 +205,15 @@ extern "C" void app_main() {
                            reinterpret_cast<void *>(channelIndex), FALLING);
     }
 
-    pinMode(RECORDING_SWITCH_PIN, INPUT_PULLUP);
+    pinMode(RECORDING_SWITCH_PIN, INPUT_PULLDOWN);
     attachInterrupt(RECORDING_SWITCH_PIN, onRecordSwitchChange, CHANGE);
 
     FastLED.addLeds<WS2812B, 13, GRB>(fastLedBuffer.data(), CHANNEL_COUNT);
     FastLED.showColor(CRGB::Black);
 
-    stateMachine.setCurrentState(std::make_unique<InitialState>());
+    stateMachine.setNextState(new LiveState());
+
+    ESP_LOGI(TAG, "Initialization complete. Starting state machine loop...");
 
     while (true) {
         stateMachine.update();

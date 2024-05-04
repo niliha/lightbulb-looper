@@ -1,3 +1,4 @@
+#include <esp_log.h>
 #include <memory>
 
 class State {
@@ -7,8 +8,10 @@ class State {
     }
 
     /// Execute the state logic.
-    /// If a state transistion is required, an unique_ptr to the next state is returned, otherwise nullptr.
-    virtual std::unique_ptr<State> execute() = 0;
+    /// If a state transistion is required, an pointer to the next state is returned, otherwise nullptr.
+    virtual State *execute() = 0;
+
+    virtual std::string getName() = 0;
 
     // Executed once when the state is exited.
     virtual void exit() {
@@ -20,26 +23,44 @@ class State {
 
 class StateMachine {
  public:
-    void setCurrentState(std::unique_ptr<State> state) {
-        assert(state != nullptr);
+    void setNextState(State *nextState) {
+        assert(nextState != nullptr);
 
-        if (currentState) {
-            currentState->exit();
+        State *discardedState;
+        if (xQueueReceiveFromISR(nextStateQueue, &discardedState, nullptr) == pdTRUE) {
+            delete discardedState;
         }
 
-        currentState = std::move(state);  // Transfer ownership
-        currentState->enter();
+        xQueueSendFromISR(nextStateQueue, (const void *)&nextState, nullptr);
+    }
+
+    std::string getCurrentStateName() {
+        return currentState != nullptr ? currentState->getName() : "nullptr";
     }
 
     void update() {
-        assert(currentState != nullptr);
-        std::unique_ptr<State> newState = currentState->execute();
-        if (newState) {
-            // Move semantics to transfer ownership
-            setCurrentState(std::move(newState));
+        State *nextState;
+        if (xQueueReceive(nextStateQueue, &nextState, 0) == pdTRUE) {
+            ESP_LOGI("StateMachine", "Transitioning states from %s to %s...",
+                     currentState != nullptr ? currentState->getName().c_str() : "nullptr",
+                     nextState->getName().c_str());
+
+            if (currentState != nullptr) {
+                currentState->exit();
+                delete currentState;
+            }
+
+            currentState = nextState;
+            currentState->enter();
+        }
+
+        nextState = currentState->execute();
+        if (nextState != nullptr) {
+            setNextState(nextState);
         }
     }
 
  private:
-    std::unique_ptr<State> currentState = nullptr;
+    State *currentState = nullptr;
+    QueueHandle_t nextStateQueue = xQueueCreate(1, sizeof(State *));
 };
