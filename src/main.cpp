@@ -4,6 +4,7 @@
 #include <FastLED.h>
 #include <dimmer/PixelFrame.hpp>
 #include <esp_log.h>
+#include <numeric>
 #include <state_machine.hpp>
 
 static const char *TAG = "main";
@@ -13,6 +14,8 @@ const int CHANNEL_COUNT = 6;
 const std::array<int, CHANNEL_COUNT> FADE_TRIGGER_PINS = {5, 18, 19, 21, 22, 23};
 const std::array<int, CHANNEL_COUNT> FADE_SPEED_PINS = {34, 35, 14, 2, 4, 32};
 const int RECORDING_SWITCH_PIN = 27;
+const int RANDOMIZE_SWITCH_PIN = 28;  // TODO: Assign correct pin number
+
 const int BUTTON_DEBOUNCE_MS = 100;
 const int UPDATE_INTERVAL_MS = 33;
 const int MIN_BRIGHTNESS = 0;
@@ -23,11 +26,11 @@ const float MIN_FADE_STEP_PER_INTERVAL = (float)MAX_BRIGHTNESS / MAX_FADE_DURATI
 const float MAX_FADE_STEP_PER_INTERVAL = (float)MAX_BRIGHTNESS / MIN_FADE_DURATION_MS * UPDATE_INTERVAL_MS;
 
 // State
-std::array<unsigned long, CHANNEL_COUNT> lastFadeTriggerTimes = {0};
-std::array<CRGB, CHANNEL_COUNT> fastLedBuffer = {0};
-std::array<float, CHANNEL_COUNT> channels = {0.0};  // [0, 255]
+std::array<unsigned long, CHANNEL_COUNT> lastFadeTriggerTimes_ = {0};
+std::array<CRGB, CHANNEL_COUNT> fastLedBuffer_ = {0};
+std::array<float, CHANNEL_COUNT> channels_ = {0.0};  // [0, 255]
 
-StateMachine stateMachine;
+StateMachine stateMachine_;
 
 struct PlaybackEvent {
     const unsigned long millis;
@@ -37,7 +40,7 @@ struct PlaybackEvent {
         : millis(millis), channels(channels) {
     }
 };
-std::vector<PlaybackEvent> playbackEvents;
+std::vector<PlaybackEvent> playbackEvents_;
 
 float mapFloat(float value, float fromLow, float fromHigh, float toLow, float toHigh) {
     return (value - fromLow) * (toHigh - toLow) / (fromHigh - fromLow) + toLow;
@@ -52,11 +55,11 @@ bool prepareChannels() {
 
         // Fade down if fade trigger is currently not pressed, otherwise fade up
         if (digitalRead(FADE_TRIGGER_PINS[channelIndex]) == LOW &&
-            millis() - lastFadeTriggerTimes[channelIndex] > UPDATE_INTERVAL_MS) {
+            millis() - lastFadeTriggerTimes_[channelIndex] > UPDATE_INTERVAL_MS) {
             fadeStep *= -1;
         }
 
-        float &currentBrightness = channels[channelIndex];
+        float &currentBrightness = channels_[channelIndex];
         float newBrightness = constrain(currentBrightness + fadeStep, MIN_BRIGHTNESS, MAX_BRIGHTNESS);
 
         // Write is only required if at least one channel has changed its integer value, since
@@ -72,7 +75,7 @@ bool prepareChannels() {
 
 void writeChannels() {
     // LED strip visualizer
-    std::transform(channels.begin(), channels.end(), fastLedBuffer.begin(),
+    std::transform(channels_.begin(), channels_.end(), fastLedBuffer_.begin(),
                    [](float brightness) { return CRGB(brightness, 0, 0); });
     FastLED.show();
 
@@ -100,9 +103,9 @@ class LiveState : public State {
 class RecordingState : public State {
  public:
     void enter() override {
-        playbackEvents.clear();
-        lastFadeTriggerTimes.fill(0);
-        channels.fill(0);
+        playbackEvents_.clear();
+        lastFadeTriggerTimes_.fill(0);
+        channels_.fill(0);
         recordingStartMillis = millis();
     }
 
@@ -110,9 +113,9 @@ class RecordingState : public State {
         bool isWriteRequired = prepareChannels();
         if (isWriteRequired) {
             auto eventMillis = millis() - recordingStartMillis;
-            playbackEvents.emplace_back(eventMillis, channels);
+            playbackEvents_.emplace_back(eventMillis, channels_);
             writeChannels();
-            ESP_LOGI("RecordingState", "Recorded %dth event at %lu ms", playbackEvents.size(), eventMillis);
+            ESP_LOGI("RecordingState", "Recorded %dth event at %lu ms", playbackEvents_.size(), eventMillis);
         }
 
         delay(UPDATE_INTERVAL_MS);
@@ -130,29 +133,38 @@ class RecordingState : public State {
 class PlaybackState : public State {
  public:
     void enter() override {
-        playbackStartMillis = millis();
+        playbackStartMillis_ = millis();
+
+        std::iota(channelMapping_.begin(), channelMapping_.end(), 0);
+        if (digitalRead(RANDOMIZE_SWITCH_PIN) == HIGH) {
+            ESP_LOGI("PlaybackState", "Randomizing playback events...");
+            std::random_shuffle(channelMapping_.begin(), channelMapping_.end());
+        }
     }
 
     State *execute() override {
-        if (playbackEvents.empty()) {
+        if (playbackEvents_.empty()) {
             ESP_LOGW("PlaybackState", "No playback events available. Transitioning to LiveState...");
             return new LiveState();
         }
 
-        auto &event = playbackEvents[currentPlaybackEventIndex];
-        ESP_LOGI("PlaybackState", "Executing playback event %d of %d...", currentPlaybackEventIndex + 1,
-                 playbackEvents.size());
+        auto &event = playbackEvents_[currentPlaybackEventIndex_];
+        ESP_LOGI("PlaybackState", "Executing playback event %d of %d...", currentPlaybackEventIndex_ + 1,
+                 playbackEvents_.size());
 
-        auto millisSincePlaybackStart = millis() - playbackStartMillis;
+        auto millisSincePlaybackStart = millis() - playbackStartMillis_;
         if (event.millis > millisSincePlaybackStart) {
             delay(event.millis - millisSincePlaybackStart);
         }
 
-        channels = event.channels;
+        channels_ = event.channels;
+        std::transform(channelMapping_.begin(), channelMapping_.end(), channels_.begin(),
+                       [](int channelIndex) { return channels_[channelIndex]; });
+
         writeChannels();
 
-        currentPlaybackEventIndex++;
-        if (currentPlaybackEventIndex >= playbackEvents.size()) {
+        currentPlaybackEventIndex_++;
+        if (currentPlaybackEventIndex_ >= playbackEvents_.size()) {
             return new PlaybackState();
         } else {
             return nullptr;
@@ -164,14 +176,15 @@ class PlaybackState : public State {
     }
 
  private:
-    int currentPlaybackEventIndex = 0;
-    unsigned long playbackStartMillis = 0;
+    int currentPlaybackEventIndex_ = 0;
+    unsigned long playbackStartMillis_ = 0;
+    std::array<int, CHANNEL_COUNT> channelMapping_;
 };
 
 void IRAM_ATTR onFadeTrigger(void *param) {
     int channelIndex = reinterpret_cast<int>(param);
     // Store the time of the last fade trigger event to avoid missing it while polling
-    lastFadeTriggerTimes[channelIndex] = millis();
+    lastFadeTriggerTimes_[channelIndex] = millis();
 }
 
 void IRAM_ATTR onRecordSwitchChange() {
@@ -184,10 +197,10 @@ void IRAM_ATTR onRecordSwitchChange() {
         lastRecordButtonEventTimeMs = currentMillis;
     }
 
-    if (stateMachine.getCurrentStateName() == "RecordingState") {
-        stateMachine.setNextState(new PlaybackState());
+    if (stateMachine_.getCurrentStateName() == "RecordingState") {
+        stateMachine_.setNextStateFromIsr(new PlaybackState());
     } else {
-        stateMachine.setNextState(new RecordingState());
+        stateMachine_.setNextStateFromIsr(new RecordingState());
     }
 }
 
@@ -206,16 +219,17 @@ extern "C" void app_main() {
     }
 
     pinMode(RECORDING_SWITCH_PIN, INPUT_PULLDOWN);
+    pinMode(RANDOMIZE_SWITCH_PIN, INPUT_PULLDOWN);
     attachInterrupt(RECORDING_SWITCH_PIN, onRecordSwitchChange, CHANGE);
 
-    FastLED.addLeds<WS2812B, 13, GRB>(fastLedBuffer.data(), CHANNEL_COUNT);
+    FastLED.addLeds<WS2812B, 13, GRB>(fastLedBuffer_.data(), CHANNEL_COUNT);
     FastLED.showColor(CRGB::Black);
 
-    stateMachine.setNextState(new LiveState());
+    stateMachine_.setNextState(new LiveState());
 
     ESP_LOGI(TAG, "Initialization complete. Starting state machine loop...");
 
     while (true) {
-        stateMachine.update();
+        stateMachine_.update();
     }
 }
