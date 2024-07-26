@@ -4,10 +4,10 @@
 
 #include <array>
 
-class MultiMcp23s17 {
+class Mcp23s17 {
  public:
-    MultiMcp23s17(int spi2MosiPin = 13, int spi2SclkPin = 14, int spi2CsPin = 15, int spi3MosiPin = 23,
-                  int spi3SclkPin = 18, int spi3CsPin = 5, unsigned int clockFrequency = SPI_MASTER_FREQ_10M);
+    Mcp23s17(int spi2MosiPin = 13, int spi2SclkPin = 14, int spi2CsPin = 15,
+             unsigned int clockFrequency = SPI_MASTER_FREQ_10M);
 
     void stageChannel(uint16_t channel, bool turnOn);
     void commitStagedChannels();
@@ -22,11 +22,9 @@ class MultiMcp23s17 {
 
     static const uint8_t IOCON_HAEN_BIT = 3;
 
-    std::array<uint16_t, 4> stagedChannels_;
-    std::array<bool, 4> isDeviceStaged_;
+    uint16_t stagedChannels_;
 
     spi_device_handle_t spi2DeviceHandle_;
-    spi_device_handle_t spi3DeviceHandle_;
 
     uint8_t getDeviceAddress(uint8_t deviceId);
 

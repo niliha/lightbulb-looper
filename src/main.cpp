@@ -1,39 +1,39 @@
 #include <Arduino.h>
 
+#include "StateMachine.hpp"
 #include "dimmer/AcDimmer.hpp"
+#include <Adafruit_MPR121.h>
 #include <FastLED.h>
 #include <dimmer/PixelFrame.hpp>
 #include <esp_log.h>
 #include <numeric>
-#include <state_machine.hpp>
 
 static const char *TAG = "main";
 
 // Configuration
-const int CHANNEL_COUNT = 6;
-const std::array<int, CHANNEL_COUNT> FADE_TRIGGER_PINS = {5, 18, 19, 21, 22, 23};
-// const std::array<int, CHANNEL_COUNT> FADE_SPEED_PINS = {34, 35, 14, 2, 4, 32};
+const int CHANNEL_COUNT = 8;
 const int FADE_SPEED_PIN = 34;
 const int RECORDING_BUTTON_PIN = 27;
 const int RECORDING_LED_PIN = 16;
-const int RANDOMIZE_SWITCH_PIN = 28;  // TODO: Assign correct pin number
+const int LED_STRIP_PIN = 19;
+const int ZERO_CROSSING_PIN = 4;
 
 const int BUTTON_DEBOUNCE_MS = 500;
 const int UPDATE_INTERVAL_MS = 33;
 const int MIN_BRIGHTNESS = 0;
-const int MAX_BRIGHTNESS = 255;
+const int MAX_BRIGHTNESS = 100;
 const int MIN_FADE_DURATION_MS = 500;
-const int MAX_FADE_DURATION_MS = 5000;
+const int MAX_FADE_DURATION_MS = 2500;
 const float MIN_FADE_STEP_PER_INTERVAL = (float)MAX_BRIGHTNESS / MAX_FADE_DURATION_MS * UPDATE_INTERVAL_MS;
 const float MAX_FADE_STEP_PER_INTERVAL = (float)MAX_BRIGHTNESS / MIN_FADE_DURATION_MS * UPDATE_INTERVAL_MS;
 
-// State
+// State Machine context
 std::array<unsigned long, CHANNEL_COUNT> lastFadeTriggerTimes_ = {0};
 std::array<CRGB, CHANNEL_COUNT> fastLedBuffer_ = {0};
 std::array<float, CHANNEL_COUNT> channels_ = {0.0};  // [0, 255]
 std::array<float, CHANNEL_COUNT> fadeSteps_ = {0.0};
-
 StateMachine stateMachine_;
+Adafruit_MPR121 touchSensor_ = Adafruit_MPR121();
 
 struct PlaybackEvent {
     const unsigned long millis;
@@ -51,15 +51,15 @@ float mapFloat(float value, float fromLow, float fromHigh, float toLow, float to
 
 bool prepareChannels() {
     bool isWriteRequired = false;
+    uint16_t touchData = touchSensor_.touched();
 
     for (int channelIndex = 0; channelIndex < CHANNEL_COUNT; channelIndex++) {
-        // Fade down if fade trigger is currently not pressed, otherwise fade up
+        // Fade up if trigger is pressed, otherwise fade down
         int fadeSign = -1;
-        if (digitalRead(FADE_TRIGGER_PINS[channelIndex]) == HIGH) {
+        if (touchData & (1 << channelIndex)) {
             fadeSign = 1;
 
             if (millis() - lastFadeTriggerTimes_[channelIndex] > 3 * UPDATE_INTERVAL_MS) {
-                ESP_LOGI("prepareChannels", "Detected fade trigger after absence for channel %d", channelIndex);
                 int fadeSpeed = analogRead(FADE_SPEED_PIN);  // ADC value is between 0 and 4095
                 fadeSteps_[channelIndex] =
                     mapFloat(fadeSpeed, 0, 4095, MIN_FADE_STEP_PER_INTERVAL, MAX_FADE_STEP_PER_INTERVAL);
@@ -90,7 +90,10 @@ void writeChannels() {
     FastLED.show();
 
     // Light bulbs
-    // AcDimmer::write(channels);
+    std::vector<uint8_t> channelsInt(CHANNEL_COUNT);
+    std::transform(channels_.begin(), channels_.end(), channelsInt.begin(),
+                   [](float brightness) { return (uint8_t)brightness; });
+    AcDimmer::write(channelsInt);
 }
 
 class LiveState : public State {
@@ -135,6 +138,7 @@ class RecordingState : public State {
         }
 
         delay(UPDATE_INTERVAL_MS);
+
         return nullptr;
     }
 
@@ -143,6 +147,7 @@ class RecordingState : public State {
     }
 
  private:
+    unsigned long MAX_RECORDING_DURATION_MS = 1000 * 60 * 5;  // 5 minutes
     unsigned long recordingStartMillis = 0;
 };
 
@@ -154,18 +159,6 @@ class PlaybackState : public State {
 
     void enter() override {
         playbackStartMillis_ = millis();
-
-        std::iota(channelMapping_.begin(), channelMapping_.end(), 0);
-        // if (digitalRead(RANDOMIZE_SWITCH_PIN) == HIGH) {
-        if (false) {
-            ESP_LOGI("PlaybackState", "Randomizing playback events...");
-            std::random_shuffle(channelMapping_.begin(), channelMapping_.end());
-            printf("Channel mapping: ");
-            for (int i = 0; i < CHANNEL_COUNT; i++) {
-                printf("%d ", channelMapping_[i]);
-            }
-            printf("\n");
-        }
     }
 
     State *execute() override {
@@ -175,8 +168,6 @@ class PlaybackState : public State {
         }
 
         auto &event = playbackEvents_[currentPlaybackEventIndex_];
-        // ESP_LOGI("PlaybackState", "Executing playback event %d of %d...", currentPlaybackEventIndex_ + 1,
-        //          playbackEvents_.size());
 
         auto millisSincePlaybackStart = millis() - playbackStartMillis_;
         if (event.millis > millisSincePlaybackStart) {
@@ -184,10 +175,6 @@ class PlaybackState : public State {
         }
 
         channels_ = event.channels;
-        auto channels = channels_;
-        std::transform(channelMapping_.begin(), channelMapping_.end(), channels.begin(),
-                       [](int channelIndex) { return channels_[channelIndex]; });
-        channels_ = channels;
         writeChannels();
 
         currentPlaybackEventIndex_++;
@@ -201,7 +188,6 @@ class PlaybackState : public State {
  private:
     int currentPlaybackEventIndex_ = 0;
     unsigned long playbackStartMillis_ = 0;
-    std::array<int, CHANNEL_COUNT> channelMapping_;
 };
 
 void IRAM_ATTR onRecordButtonPressed() {
@@ -213,35 +199,40 @@ void IRAM_ATTR onRecordButtonPressed() {
     }
     lastRecordButtonMillis = currentMillis;
 
+    State *nextState;
     if (stateMachine_.getCurrentStateName() != "RecordingState") {
-        stateMachine_.setNextStateFromIsr(new RecordingState());
+        nextState = new RecordingState();
     } else {
-        stateMachine_.setNextStateFromIsr(new PlaybackState());
+        nextState = new PlaybackState();
     }
+
+    stateMachine_.setNextStateFromIsr(nextState);
 }
 
 extern "C" void app_main() {
     initArduino();
-    Serial.begin(115200);
 
+    Serial.begin(115200);
+    esp_log_level_set("gpio", ESP_LOG_WARN);
     delay(1000);
 
-    esp_log_level_set("gpio", ESP_LOG_WARN);
-    // AcDimmer::init(CHANNEL_COUNT, 5, 0);
-    // AcDimmer::testLights();
+    AcDimmer::init(CHANNEL_COUNT, ZERO_CROSSING_PIN, 0);
+    AcDimmer::testLights();
 
-    for (int channelIndex = 0; channelIndex < CHANNEL_COUNT; channelIndex++) {
-        pinMode(FADE_TRIGGER_PINS[channelIndex], INPUT);
+    if (!touchSensor_.begin(0x5A)) {
+        ESP_LOGE(TAG, "Failed to initialize MPR121 touch sensor");
+        ESP.restart();
     }
+    ESP_LOGI(TAG, "MPR121 touch sensor initialized");
 
     pinMode(RECORDING_LED_PIN, OUTPUT);
     digitalWrite(RECORDING_LED_PIN, LOW);
     pinMode(RECORDING_BUTTON_PIN, INPUT_PULLUP);
-    // pinMode(RANDOMIZE_SWITCH_PIN, INPUT_PULLDOWN);
     attachInterrupt(RECORDING_BUTTON_PIN, onRecordButtonPressed, FALLING);
 
-    FastLED.addLeds<WS2812B, 13, GRB>(fastLedBuffer_.data(), CHANNEL_COUNT);
+    FastLED.addLeds<WS2812B, LED_STRIP_PIN, GRB>(fastLedBuffer_.data(), CHANNEL_COUNT);
     FastLED.showColor(CRGB::Black);
+    FastLED.setBrightness(126);
 
     stateMachine_.setNextState(new LiveState());
 

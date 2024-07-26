@@ -3,7 +3,7 @@
 #include <Arduino.h>
 #include <map>
 
-#include "MultiMcp23s17.hpp"
+#include "Mcp23s17.hpp"
 
 namespace AcDimmer {
 
@@ -29,7 +29,7 @@ volatile unsigned long lastZeroCrossingMicros_ = 0;
 
 int channelCount_;
 int zeroCrossingPin_;
-MultiMcp23s17 portExpander_;
+Mcp23s17 portExpander_;
 
 hw_timer_t *eventTimer_;
 QueueHandle_t eventQueue_;
@@ -168,27 +168,23 @@ void write(const std::vector<uint8_t> &channels) {
 }
 
 void testLights() {
-    PixelFrame pixelFrame(channelCount_);
-    int maxBrightness = 20;
+    std::vector<uint8_t> channels(channelCount_);
+    int maxBrightness = 70;
     int frameMillis = 10;
     ESP_LOGI(TAG, "Turning on lights slowly...");
-    for (int channel = 0; channel < pixelFrame.size(); channel++) {
+    for (int channelIndex = 0; channelIndex < channels.size(); channelIndex++) {
         for (int brightness = 0; brightness <= maxBrightness; brightness++) {
-            pixelFrame[channel].r = brightness;
-            pixelFrame[channel].g = brightness;
-            pixelFrame[channel].b = brightness;
-            AcDimmer::write(pixelFrame);
+            channels[channelIndex] = brightness;
+            AcDimmer::write(channels);
             delay(frameMillis);
         }
     }
 
     ESP_LOGI(TAG, "Turning off lights slowly...");
-    for (int channel = pixelFrame.size() - 1; channel >= 0; channel--) {
+    for (int channel = channels.size() - 1; channel >= 0; channel--) {
         for (int brightness = maxBrightness; brightness >= 0; brightness--) {
-            pixelFrame[channel].r = brightness;
-            pixelFrame[channel].g = brightness;
-            pixelFrame[channel].b = brightness;
-            AcDimmer::write(pixelFrame);
+            channels[channel] = brightness;
+            AcDimmer::write(channels);
             delay(frameMillis);
         }
     }

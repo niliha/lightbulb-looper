@@ -26,11 +26,6 @@ class StateMachine {
     void setNextState(State *nextState) {
         assert(nextState != nullptr);
 
-        State *discardedState;
-        if (xQueueReceiveFromISR(nextStateQueue_, &discardedState, nullptr) == pdTRUE) {
-            delete discardedState;
-        }
-
         if (xQueueSend(nextStateQueue_, (const void *)&nextState, 0) == errQUEUE_FULL) {
             ESP_LOGW("StateMachine", "Failed to set next state (%s) since there is already a State waiting",
                      nextState->getName().c_str());
